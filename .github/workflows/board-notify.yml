@@ -1,0 +1,317 @@
+
+board-notify.yml
+name: Board → Discord
+
+# Notifikasi otomatis: tiap ada kartu board yang berubah (baru / pindah status),
+# kirim pesan ke Discord. Berjalan tiap 15 menit + bisa dijalankan manual.
+# Syarat: 2 secrets di repo → PROJECTS_PAT dan DISCORD_WEBHOOK_URL.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  board-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kirim update board ke Discord
+        env:
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_PAT }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PROJECT_OWNER: safamaster223
+          PROJECT_NUMBER: "6"
+          WINDOW_MINUTES: "16"
+        run: |
+          python3 - << 'PYEOF'
+          import os, json, urllib.request, urllib.error, datetime
+
+          API = "https://api.github.com/graphql"
+
+          def gql(query, variables):
+              req = urllib.request.Request(
+                  API,
+                  data=json.dumps({"query": query, "variables": variables}).encode(),
+                  headers={
+                      "Authorization": "Bearer " + os.environ["PROJECTS_TOKEN"],
+                      "Content-Type": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      body = json.load(r)
+              except urllib.error.HTTPError as e:
+                  print("HTTP", e.code, e.read().decode()[:300])
+                  raise SystemExit(1)
+              if body.get("errors"):
+                  print(json.dumps(body["errors"], indent=2)[:1500])
+                  raise SystemExit(1)
+              return body["data"]
+
+          def post_discord(text):
+              req = urllib.request.Request(
+                  os.environ["DISCORD_WEBHOOK_URL"],
+                  data=json.dumps({"content": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  r.read()
+
+          def parse_ts(s):
+              return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+          owner = os.environ["PROJECT_OWNER"]
+          number = int(os.environ["PROJECT_NUMBER"])
+          window = int(os.environ.get("WINDOW_MINUTES", "16"))
+          cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=window)
+
+          d = gql(
+              "query($l:String!,$n:Int!){user(login:$l){projectV2(number:$n){id title}}}",
+              {"l": owner, "n": number},
+          )
+          project = (d.get("user") or {}).get("projectV2")
+          if not project:
+              print("Project tidak ketemu. Cek PROJECT_OWNER / PROJECT_NUMBER.")
+              raise SystemExit(1)
+          pid = project["id"]
+          print("Project:", project["title"])
+
+          q = """
+          query($pid:ID!, $cur:String) {
+            node(id:$pid) {
+              ... on ProjectV2 {
+                items(first:100, after:$cur) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    updatedAt
+                    content {
+                      __typename
+                      ... on Issue { number title url createdAt }
+                      ... on PullRequest { number title url createdAt }
+                      ... on DraftIssue { title createdAt }
+                    }
+                    fieldValues(first:20) {
+                      nodes {
+                        __typename
+                        ... on ProjectV2ItemFieldSingleSelectValue {
+                          name
+                          field { ... on ProjectV2SingleSelectField { name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          """
+
+          lines = []
+          cur = None
+          while True:
+              d = gql(q, {"pid": pid, "cur": cur})
+              conn = d["node"]["items"]
+              for it in conn["nodes"]:
+                  if parse_ts(it["updatedAt"]) < cutoff:
+                      continue
+                  c = it.get("content") or {}
+                  t = c.get("__typename")
+                  if t == "Issue":
+                      title = "#%s %s" % (c["number"], c["title"])
+                      url = c.get("url") or ""
+                  elif t == "PullRequest":
+                      title = "PR #%s %s" % (c["number"], c["title"])
+                      url = c.get("url") or ""
+                  elif t == "DraftIssue":
+                      title = c.get("title") or "(tanpa judul)"
+                      url = ""
+                  else:
+                      continue
+                  status = None
+                  fallback = None
+                  for fv in it["fieldValues"]["nodes"]:
+                      if fv.get("__typename") == "ProjectV2ItemFieldSingleSelectValue":
+                          fname = ((fv.get("field") or {}).get("name") or "").lower()
+                          if fname == "status":
+                              status = fv.get("name")
+                              break
+                          if fallback is None:
+                              fallback = fv.get("name")
+                  if status is None:
+                      status = fallback
+                  created = c.get("createdAt")
+                  if created and parse_ts(created) >= cutoff:
+                      lines.append("\U0001F195 **%s** — kartu baru masuk board%s" % (title, ("\n" + url) if url else ""))
+                  else:
+                      lines.append("\U0001F504 **%s** · status: **%s**%s" % (title, status or "tanpa status", ("\n" + url) if url else ""))
+              if not conn["pageInfo"]["hasNextPage"]:
+                  break
+              cur = conn["pageInfo"]["endCursor"]
+
+          if not lines:
+              print("Tidak ada perubahan board dalam %d menit terakhir." % window)
+          else:
+              if len(lines) > 10:
+                  lines = lines[:10] + ["…dan %d update lainnya." % (len(lines) - 10)]
+              post_discord("\n\n".join(lines))
+              print("Terkirim %d update ke Discord." % len(lines))
+          PYEOF
+name: Board → Discord
+
+# Notifikasi otomatis: tiap ada kartu board yang berubah (baru / pindah status),
+# kirim pesan ke Discord. Berjalan tiap 15 menit + bisa dijalankan manual.
+# Syarat: 2 secrets di repo → PROJECTS_PAT dan DISCORD_WEBHOOK_URL.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  board-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kirim update board ke Discord
+        env:
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_PAT }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PROJECT_OWNER: safamaster223
+          PROJECT_NUMBER: "6"
+          WINDOW_MINUTES: "16"
+        run: |
+          python3 - << 'PYEOF'
+          import os, json, urllib.request, urllib.error, datetime
+
+          API = "https://api.github.com/graphql"
+
+          def gql(query, variables):
+              req = urllib.request.Request(
+                  API,
+                  data=json.dumps({"query": query, "variables": variables}).encode(),
+                  headers={
+                      "Authorization": "Bearer " + os.environ["PROJECTS_TOKEN"],
+                      "Content-Type": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      body = json.load(r)
+              except urllib.error.HTTPError as e:
+                  print("HTTP", e.code, e.read().decode()[:300])
+                  raise SystemExit(1)
+              if body.get("errors"):
+                  print(json.dumps(body["errors"], indent=2)[:1500])
+                  raise SystemExit(1)
+              return body["data"]
+
+          def post_discord(text):
+              req = urllib.request.Request(
+                  os.environ["DISCORD_WEBHOOK_URL"],
+                  data=json.dumps({"content": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  r.read()
+
+          def parse_ts(s):
+              return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+          owner = os.environ["PROJECT_OWNER"]
+          number = int(os.environ["PROJECT_NUMBER"])
+          window = int(os.environ.get("WINDOW_MINUTES", "16"))
+          cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=window)
+
+          d = gql(
+              "query($l:String!,$n:Int!){user(login:$l){projectV2(number:$n){id title}}}",
+              {"l": owner, "n": number},
+          )
+          project = (d.get("user") or {}).get("projectV2")
+          if not project:
+              print("Project tidak ketemu. Cek PROJECT_OWNER / PROJECT_NUMBER.")
+              raise SystemExit(1)
+          pid = project["id"]
+          print("Project:", project["title"])
+
+          q = """
+          query($pid:ID!, $cur:String) {
+            node(id:$pid) {
+              ... on ProjectV2 {
+                items(first:100, after:$cur) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    updatedAt
+                    content {
+                      __typename
+                      ... on Issue { number title url createdAt }
+                      ... on PullRequest { number title url createdAt }
+                      ... on DraftIssue { title createdAt }
+                    }
+                    fieldValues(first:20) {
+                      nodes {
+                        __typename
+                        ... on ProjectV2ItemFieldSingleSelectValue {
+                          name
+                          field { ... on ProjectV2SingleSelectField { name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          """
+
+          lines = []
+          cur = None
+          while True:
+              d = gql(q, {"pid": pid, "cur": cur})
+              conn = d["node"]["items"]
+              for it in conn["nodes"]:
+                  if parse_ts(it["updatedAt"]) < cutoff:
+                      continue
+                  c = it.get("content") or {}
+                  t = c.get("__typename")
+                  if t == "Issue":
+                      title = "#%s %s" % (c["number"], c["title"])
+                      url = c.get("url") or ""
+                  elif t == "PullRequest":
+                      title = "PR #%s %s" % (c["number"], c["title"])
+                      url = c.get("url") or ""
+                  elif t == "DraftIssue":
+                      title = c.get("title") or "(tanpa judul)"
+                      url = ""
+                  else:
+                      continue
+                  status = None
+                  fallback = None
+                  for fv in it["fieldValues"]["nodes"]:
+                      if fv.get("__typename") == "ProjectV2ItemFieldSingleSelectValue":
+                          fname = ((fv.get("field") or {}).get("name") or "").lower()
+                          if fname == "status":
+                              status = fv.get("name")
+                              break
+                          if fallback is None:
+                              fallback = fv.get("name")
+                  if status is None:
+                      status = fallback
+                  created = c.get("createdAt")
+                  if created and parse_ts(created) >= cutoff:
+                      lines.append("\U0001F195 **%s** — kartu baru masuk board%s" % (title, ("\n" + url) if url else ""))
+                  else:
+                      lines.append("\U0001F504 **%s** · status: **%s**%s" % (title, status or "tanpa status", ("\n" + url) if url else ""))
+              if not conn["pageInfo"]["hasNextPage"]:
+                  break
+              cur = conn["pageInfo"]["endCursor"]
+
+          if not lines:
+              print("Tidak ada perubahan board dalam %d menit terakhir." % window)
+          else:
+              if len(lines) > 10:
+                  lines = lines[:10] + ["…dan %d update lainnya." % (len(lines) - 10)]
+              post_discord("\n\n".join(lines))
+              print("Terkirim %d update ke Discord." % len(lines))
+          PYEOF
+
+
+Chat — Muse
