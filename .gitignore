@@ -1,0 +1,18 @@
+# Env & secrets — JANGAN commit key asli
+.env
+!.env.example
+
+# Dependencies & build
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# Uploads lokal & file runtime
+backend/public/uploads/*
+!backend/public/uploads/.gitkeep
+*.log
+.DS_Store
+Thumbs.db
+
+# Laragon/Apache lokal
+# (junction C:\laragon\www\e-commerce menunjuk ke sini, tidak ikut repo)
